@@ -1,0 +1,32 @@
+{
+  "name": "terarium-module-canvas",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PotatoBin/terarium-module-canvas.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/PotatoBin/terarium-module-canvas/issues"
+  },
+  "homepage": "https://github.com/PotatoBin/terarium-module-canvas#readme",
+  "dependencies": {
+    "@google-cloud/cloud-sql-connector": "^1.8.4",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "multer": "^2.0.2",
+    "openai": "^6.9.1",
+    "pg": "^8.16.3",
+    "pgvector": "^0.2.1",
+    "sharp": "^0.34.5",
+    "ws": "^8.18.3"
+  }
+}

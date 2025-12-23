@@ -1,0 +1,662 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Portal</title>
+<style>
+:root{--bg:#222;--fg:#fff;--muted:rgba(255,255,255,.7);--ui:rgba(255,255,255,.08);--font:-apple-system,system-ui,Segoe UI,Roboto,Noto Sans KR,Apple SD Gothic Neo,sans-serif}
+*{box-sizing:border-box}html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--font)}
+.screen{position:fixed;inset:0;display:none;align-items:center;justify-content:center}
+.show{display:flex}
+.wait img,.wait video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.video video,.loop video,.final video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.camera video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}
+.overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+.overlay img{width:100%;height:100%;object-fit:cover}
+.count{position:absolute;top:6vmin;right:6vmin;font-size:14vmin;font-weight:900;text-shadow:0 20px 80px rgba(0,0,0,.6);opacity:0;transition:opacity .2s ease}
+.retake{position:absolute;bottom:10vmin;left:50%;transform:translateX(-50%);font-size:4vmin;font-weight:600;text-shadow:0 12px 40px rgba(0,0,0,.65);color:#fff}
+.dim{position:absolute;inset:0;background:rgba(0,0,0,.15)}
+.textbox{text-align:center;max-width:80ch;padding:0 4vw}
+h2{font-size:6vmin;margin:0 0 1rem}
+p{font-size:3vmin;color:var(--muted)}
+.end p{font-size:3.2vmin}
+.duplicate{background:var(--bg)}
+.wait-hint{position:absolute;bottom:9vmin;left:50%;transform:translateX(-50%);font-size:3.8vmin;font-weight:700;color:#fff;text-shadow:0 14px 36px rgba(0,0,0,.7);pointer-events:none}
+</style>
+</head>
+<body>
+<section id="S_WAIT" class="screen wait show">
+  <video src="/Part%201-1.small.mp4" autoplay loop playsinline></video>
+  <div class="wait-hint">캔버스에서 시작하면 자동으로 넘어가요</div>
+</section>
+<section id="S_VIDEO" class="screen video">
+  <video id="explainVideo" src="/Part%201-2.small.mp4" preload="auto" playsinline></video>
+  <div class="textbox"><h2>촬영을 준비해주세요</h2><p>잠시 후 카메라가 켜집니다.</p></div>
+</section>
+<section id="S_CAMERA" class="screen camera">
+  <video id="cam" autoplay playsinline muted></video>
+  <div class="dim"></div>
+  <div class="overlay" id="frameOverlay">
+    <img id="overlayFrameImg" alt="촬영 가이드" loading="lazy"/>
+  </div>
+  <div class="count" id="count">5</div>
+  <div class="retake" id="retakeBanner" style="display:none;">재촬영</div>
+</section>
+<section id="S_LOOP" class="screen loop">
+  <video id="transitionVideo" src="/Part%201-2-2.small.mp4" preload="auto" playsinline></video>
+  <video id="loopVideo" src="/Part%201-3.small.mp4" preload="auto" playsinline loop style="display:none;"></video>
+  <div class="textbox"><h2>그림을 그리고 있어요</h2><p>조금만 기다려주세요.</p></div>
+</section>
+<section id="S_FINAL" class="screen final">
+  <video id="finalVideo" src="/Part%201-4.small.mp4" preload="auto" playsinline></video>
+  <div class="textbox"><h2>제출 완료</h2><p>잠시 후 초기 화면으로 돌아갑니다.</p></div>
+</section>
+<section id="S_DUPLICATE" class="screen duplicate"><div class="textbox"><h2 id="duplicateMessage">이미 한번 해보셨다면, 바로 입장해주세요</h2><p>잠시 후 초기 화면으로 돌아갑니다…</p></div></section>
+
+<script>
+(async function(){
+'use strict';
+const roomId = location.pathname.split('/').pop();
+const WS_URL = (location.protocol==='https:'?'wss://':'ws://') + location.host + '/ws';
+const $ = (id)=>document.getElementById(id);
+const S = { WAIT:$('S_WAIT'), VIDEO:$('S_VIDEO'), CAMERA:$('S_CAMERA'), LOOP:$('S_LOOP'), FINAL:$('S_FINAL'), DUPLICATE:$('S_DUPLICATE') };
+const video = $('cam'); const countEl = $('count'); const explainVideo = $('explainVideo');
+const retakeBanner = $('retakeBanner'); const RETAKE_DEFAULT_TEXT = retakeBanner?.textContent || '재촬영';
+const frameOverlayEl = $('frameOverlay');
+const overlayFrameImg = $('overlayFrameImg');
+const transitionVideo = $('transitionVideo');
+const loopVideo = $('loopVideo');
+const finalVideo = $('finalVideo');
+const duplicateMessageEl = $('duplicateMessage');
+const DUPLICATE_MESSAGE = '이미 한번 해보셨다면, 바로 입장해주세요';
+const DISABLE_VIDEOS = false;
+const CACHE_NAME = 'portal-video-cache-v1';
+const VIDEO_URLS = {
+  explain: '/Part%201-2.small.mp4',
+  transition: '/Part%201-2-2.small.mp4',
+  loop: '/Part%201-3.small.mp4',
+  final: '/Part%201-4.small.mp4'
+};
+const videoCacheState = { explain:false, transition:false, loop:false, final:false };
+const FLOW = { WAIT:'wait', EXPLAIN:'explain', CAMERA:'camera', LOOP:'loop', FINAL:'final', DUP:'dup' };
+const CAMERA_GUIDE_ENABLED = true;
+const CAMERA_GUIDE_STATIC = true;
+const CAMERA_GUIDE_STATIC_FRAME = 438;
+const CAMERA_COUNTDOWN_SECONDS = 5;
+const OVERLAY_FPS = 24;
+const OVERLAY_INTERVAL = 1000 / OVERLAY_FPS;
+const OVERLAY_TRIGGER_FRAME = 285;
+const OVERLAY_RETRY_FRAME = 285;
+const OVERLAY_MAX_FRAME = 533;
+const OVERLAY_FRAME_DIGITS = 5;
+const OVERLAY_FRAME_PATH_PREFIX = '/Part%201-2/Part%201-4_';
+let overlayTimer=null;
+let overlayFrameIndex=0;
+let overlayCountdownArmed=false;
+let countdownResolvers=[];
+let sessionEndRequested=false;
+let flowState=FLOW.WAIT;
+let reloadTimer=null;
+let finalStageActive=false;
+let transitionFinishHandler=null;
+let explainVideoWarmed = false;
+let explainVideoStarted=false;
+let ws, session=null, duplicateHandled=false, duplicateTimer=null;
+function videoReady(key){ return !DISABLE_VIDEOS && !!videoCacheState[key]; }
+const cacheLog = (...args)=>{ try{ console.log('[CACHE]', ...args); }catch{} };
+initCacheState().catch(()=>{});
+if (frameOverlayEl) {
+  frameOverlayEl.style.display = CAMERA_GUIDE_ENABLED ? '' : 'none';
+}
+if (!DISABLE_VIDEOS) {
+  prefetchVideos().catch(()=>{});
+  warmExplainVideo().catch(()=>{});
+  warmAuxiliaryVideos().catch(()=>{});
+}
+function show(x){ Object.values(S).forEach(el=>el.classList.remove('show')); x.classList.add('show'); }
+function setFlow(state){ flowState = state; }
+function wsSend(o){ if(ws && ws.readyState===1) ws.send(JSON.stringify(o)); }
+function stopCam(){
+  const stream = video.srcObject;
+  if (stream) stream.getTracks().forEach(t=>t.stop());
+  video.srcObject = null;
+}
+function handleDuplicate(message){
+  if (duplicateHandled) return;
+  duplicateHandled = true;
+  session = null;
+  flowState = FLOW.DUP;
+  stopOverlayAnimation({ abort:true });
+  stopLoopStage();
+  if (finalVideo) finalVideo.pause();
+  stopCam();
+  duplicateMessageEl.textContent = message || DUPLICATE_MESSAGE;
+  show(S.DUPLICATE);
+  if (duplicateTimer) clearTimeout(duplicateTimer);
+  duplicateTimer = setTimeout(()=>location.reload(), 3500);
+}
+
+function connect(){
+  ws = new WebSocket(WS_URL);
+  ws.addEventListener('open', ()=> wsSend({ type:'join', room:roomId, role:'portal' }));
+  ws.addEventListener('message', onWS);
+  ws.addEventListener('close', ()=> setTimeout(connect, 800));
+}
+connect();
+
+async function forceVideoPlayback(videoEl){
+  if (!videoEl) return;
+  if (!videoEl.paused && !videoEl.ended) return;
+  try {
+    const playPromise = videoEl.play();
+    if (playPromise && typeof playPromise.then === 'function') await playPromise;
+  } catch (err) {
+    console.warn('Video autoplay blocked', err);
+  }
+}
+
+async function warmExplainVideo(){
+  if (!explainVideo || explainVideoWarmed) return;
+  try {
+    explainVideo.preload = 'auto';
+    explainVideo.muted = true;
+    await explainVideo.play();
+    explainVideo.pause();
+    explainVideo.currentTime = 0;
+    explainVideo.muted = false;
+    explainVideo.volume = 1;
+    explainVideoWarmed = true;
+    videoCacheState.explain = true;
+    cacheLog('warm ok', 'explain');
+  } catch (err) {
+    console.warn('warmExplainVideo failed', err);
+    if (explainVideo) {
+      explainVideo.muted = false;
+      explainVideo.volume = 1;
+    }
+    cacheLog('warm fail', 'explain', err?.message);
+  }
+}
+async function warmAuxiliaryVideos(){
+  const list=[transitionVideo, loopVideo, finalVideo];
+  for(const vid of list){
+    await warmVideoOnce(vid).catch(()=>{});
+  }
+}
+async function warmVideoOnce(videoEl){
+  if(!videoEl) return;
+  try{
+    const prevMuted=videoEl.muted;
+    videoEl.muted=true;
+    videoEl.preload='auto';
+    const playPromise = videoEl.play();
+    if(playPromise && typeof playPromise.then==='function') await playPromise;
+    videoEl.pause();
+    videoEl.currentTime=0;
+    videoEl.muted=prevMuted;
+    if (videoEl===transitionVideo) videoCacheState.transition = true;
+    if (videoEl===loopVideo) videoCacheState.loop = true;
+    if (videoEl===finalVideo) videoCacheState.final = true;
+    cacheLog('warm ok', videoEl.id||'video');
+  }catch(err){
+    videoEl.pause();
+    videoEl.currentTime=0;
+    cacheLog('warm fail', videoEl.id||'video', err?.message);
+  }
+}
+
+async function prefetchVideos(){
+  if (!('caches' in window)) return;
+  let cache=null;
+  try { cache = await caches.open(CACHE_NAME); } catch { return; }
+  try {
+    await cache.add(VIDEO_URLS.explain);
+    videoCacheState.explain = true;
+    cacheLog('prefetch ok', 'explain', VIDEO_URLS.explain);
+  } catch {}
+  for (const key of ['transition','loop','final']) {
+    const url = VIDEO_URLS[key];
+    try {
+      const res = await fetch(url, { cache:'reload' });
+      if (res && res.ok) {
+        await cache.put(url, res.clone());
+        videoCacheState[key] = true;
+        cacheLog('prefetch ok', key, url);
+      }
+    } catch (err) {
+      cacheLog('prefetch fail', key, url, err?.message);
+    }
+  }
+}
+
+async function initCacheState(){
+  if (!('caches' in window)) return;
+  try {
+    const cache = await caches.open(CACHE_NAME);
+    for (const [key,url] of Object.entries(VIDEO_URLS)) {
+      const hit = await cache.match(url);
+      if (hit) {
+        videoCacheState[key] = true;
+        cacheLog('cache hit', key, url);
+      }
+    }
+  } catch (err) {
+    cacheLog('init cache fail', err?.message);
+  }
+}
+
+
+function resetCountDisplay(){
+  countEl.textContent = '';
+  countEl.style.opacity = 0;
+}
+function padFrameIndex(idx){ return String(idx).padStart(OVERLAY_FRAME_DIGITS, '0'); }
+function isCameraGuideActive(){ return CAMERA_GUIDE_ENABLED && !!overlayFrameImg; }
+function buildFrameSrc(idx){ return `${OVERLAY_FRAME_PATH_PREFIX}${padFrameIndex(idx)}.png`; }
+function clampOverlayIndex(idx){
+  const n = Math.max(0, Math.min(OVERLAY_MAX_FRAME, Math.floor(idx || 0)));
+  return n;
+}
+function getStaticOverlayIndex(){
+  if (typeof CAMERA_GUIDE_STATIC_FRAME === 'number' && !Number.isNaN(CAMERA_GUIDE_STATIC_FRAME)) {
+    return clampOverlayIndex(CAMERA_GUIDE_STATIC_FRAME);
+  }
+  return null;
+}
+function randomOverlayIndex(){
+  return clampOverlayIndex(Math.random() * (OVERLAY_MAX_FRAME + 1));
+}
+function setOverlayFrame(idx){
+  overlayFrameIndex = clampOverlayIndex(idx);
+  updateOverlayFrame();
+}
+function setRandomOverlayFrame(){
+  if (!isCameraGuideActive()) return;
+  const staticIdx = getStaticOverlayIndex();
+  if (staticIdx != null) {
+    setOverlayFrame(staticIdx);
+  } else {
+    setOverlayFrame(randomOverlayIndex());
+  }
+}
+function nextCountdownPromise(){
+  countdownResolvers = [];
+  return new Promise((resolve)=> countdownResolvers.push(resolve));
+}
+function resolveCountdownResolvers(){
+  const resolvers = countdownResolvers.slice();
+  countdownResolvers.length = 0;
+  resolvers.forEach((fn)=>fn());
+}
+function stopOverlayAnimation({ abort=false } = {}){
+  if (overlayTimer) {
+    clearInterval(overlayTimer);
+    overlayTimer = null;
+  }
+  overlayCountdownArmed = false;
+  if (abort) resolveCountdownResolvers();
+}
+function resetForNewSession(){
+  stopOverlayAnimation({ abort:true });
+  stopLoopStage();
+  stopCam();
+  resetCountDisplay();
+  explainVideoStarted = false;
+  finalStageActive = false;
+  sessionEndRequested = false;
+  flowState = FLOW.WAIT;
+}
+function updateOverlayFrame(){
+  if (!isCameraGuideActive()) return;
+  overlayFrameImg.src = buildFrameSrc(overlayFrameIndex);
+  if (CAMERA_GUIDE_STATIC) return;
+  if (!overlayCountdownArmed && overlayFrameIndex >= OVERLAY_TRIGGER_FRAME) {
+    overlayCountdownArmed = true;
+    countdown(CAMERA_COUNTDOWN_SECONDS).then(()=>{
+      overlayCountdownArmed = false;
+      resolveCountdownResolvers();
+    });
+  }
+}
+function startOverlayAnimation(startFrame = 0){
+  stopOverlayAnimation();
+  if (!isCameraGuideActive()) {
+    resetCountDisplay();
+    return;
+  }
+  overlayCountdownArmed = false;
+  resetCountDisplay();
+  if (CAMERA_GUIDE_STATIC) {
+    setRandomOverlayFrame();
+    return;
+  }
+  setOverlayFrame(startFrame);
+  overlayTimer = setInterval(()=>{
+    if (overlayFrameIndex >= OVERLAY_MAX_FRAME) {
+      stopOverlayAnimation();
+      return;
+    }
+    overlayFrameIndex++;
+    updateOverlayFrame();
+  }, OVERLAY_INTERVAL);
+}
+async function startOverlaySequence(startFrame){
+  stopOverlayAnimation({ abort:true });
+  if (!isCameraGuideActive()) {
+    resetCountDisplay();
+    return countdown(CAMERA_COUNTDOWN_SECONDS);
+  }
+  if (CAMERA_GUIDE_STATIC) {
+    setRandomOverlayFrame();
+    resetCountDisplay();
+    return countdown(CAMERA_COUNTDOWN_SECONDS);
+  }
+  const waitPromise = nextCountdownPromise();
+  startOverlayAnimation(startFrame);
+  return waitPromise;
+}
+function delay(ms){
+  return new Promise((resolve)=> setTimeout(resolve, ms));
+}
+async function showRetryMessage(){
+  stopOverlayAnimation({ abort:true });
+  if (retakeBanner) {
+    retakeBanner.textContent = '다시 찍을게요';
+    retakeBanner.style.display = 'block';
+  }
+  resetCountDisplay();
+  await delay(1500);
+  if (retakeBanner) {
+    retakeBanner.style.display = 'none';
+    retakeBanner.textContent = RETAKE_DEFAULT_TEXT;
+  }
+}
+function playLoopVideo(){
+  if (!videoReady('loop') || !loopVideo) return;
+  loopVideo.style.display = '';
+  loopVideo.muted = true;
+  loopVideo.volume = 0;
+  loopVideo.loop = true;
+  loopVideo.currentTime = 0;
+  forceVideoPlayback(loopVideo);
+}
+function clearTransitionWatcher(){
+  if (!transitionVideo) return;
+  if (transitionFinishHandler) {
+    transitionVideo.removeEventListener('ended', transitionFinishHandler);
+    transitionFinishHandler = null;
+  }
+}
+function showLoopStage(){
+  setFlow(FLOW.LOOP);
+  show(S.LOOP);
+  if (!videoReady('transition')) return;
+  clearTransitionWatcher();
+  if (loopVideo) loopVideo.style.display = 'none';
+  if (transitionVideo) {
+    transitionVideo.style.display = '';
+    transitionVideo.currentTime = 0;
+    transitionVideo.muted = true;
+    transitionVideo.volume = 0;
+    const handleFinish = () => {
+      clearTransitionWatcher();
+      transitionVideo.pause();
+      transitionVideo.style.display = 'none';
+      playLoopVideo();
+    };
+    transitionFinishHandler = handleFinish;
+    transitionVideo.addEventListener('ended', handleFinish, { once: true });
+    forceVideoPlayback(transitionVideo);
+  }
+}
+function stopLoopStage(){
+  if (transitionVideo) {
+    clearTransitionWatcher();
+    transitionVideo.pause();
+    transitionVideo.style.display = 'none';
+  }
+  if (loopVideo) loopVideo.pause();
+}
+function showFinalStage(){
+  if (finalStageActive) return;
+  setFlow(FLOW.FINAL);
+  finalStageActive = true;
+  stopLoopStage();
+  stopOverlayAnimation({ abort:true });
+  stopCam();
+  show(S.FINAL);
+  // 재생 가능한 경우 1-4 끝까지, 아니면 바로 종료
+  if (!videoReady('final') || !finalVideo) {
+    cacheLog('skip final (not cached)');
+    requestSessionEnd();
+    return;
+  }
+  finalVideo.pause();
+  finalVideo.currentTime = 0;
+  finalVideo.muted = true;
+  finalVideo.volume = 0;
+  const failSafe = setTimeout(()=> requestSessionEnd(), 45_000);
+  const handleFinalEnd = () => {
+    clearTimeout(failSafe);
+    finalVideo.removeEventListener('ended', handleFinalEnd);
+    requestSessionEnd();
+  };
+  finalVideo.addEventListener('ended', handleFinalEnd, { once: true });
+  forceVideoPlayback(finalVideo);
+}
+function requestSessionEnd(){
+  if (sessionEndRequested) return;
+  sessionEndRequested = true;
+  if (session) {
+    wsSend({ type:'session_end', room:roomId, session, at:Date.now() });
+  }
+  scheduleReload();
+}
+function scheduleReload(){
+  if (reloadTimer) return;
+  reloadTimer = setTimeout(()=> location.reload(), 4000);
+}
+
+async function onWS(ev){
+  let msg=null; try{ msg=JSON.parse(ev.data); }catch{ return; }
+
+  if(msg.type==='face_duplicate'){
+    handleDuplicate(msg.message);
+    return;
+  }
+  if(duplicateHandled) return;
+
+  if(msg.type==='session_start' && msg.session){
+    handleSessionStart(msg.session);
+  }
+
+  if(msg.type==='drawing_submitted' && msg.session){
+    showFinalStage();
+  }
+
+  if(msg.type==='session_end'){
+    stopOverlayAnimation({ abort:true });
+    stopLoopStage();
+    stopCam();
+    if (finalVideo) finalVideo.pause();
+    show(S.WAIT);
+    scheduleReload();
+  }
+  if (msg.type === 'session_autoreset') {
+    scheduleReload();
+  }
+}
+function handleSessionStart(sid){
+  if (duplicateHandled) return;
+  resetForNewSession();
+  session = String(sid);
+  cacheLog('session_start', { explainReady: videoReady('explain') });
+  if (videoReady('explain')) {
+    setFlow(FLOW.EXPLAIN);
+    playExplainVideo();
+  } else {
+    setFlow(FLOW.CAMERA);
+    startCameraCountdown();
+  }
+}
+
+async function playExplainVideo(){
+  if(duplicateHandled) return;
+  if(explainVideoStarted) return;
+  if (DISABLE_VIDEOS) {
+    startCameraCountdown();
+    return;
+  }
+  if (!videoReady('explain')) {
+    cacheLog('skip explain (not cached)');
+    startCameraCountdown();
+    return;
+  }
+  setFlow(FLOW.EXPLAIN);
+  explainVideoStarted = true;
+  if(!explainVideo){
+    startCameraCountdown();
+    return;
+  }
+  await warmExplainVideo();
+  show(S.VIDEO);
+  explainVideo.pause();
+  explainVideo.currentTime = 0;
+  explainVideo.muted = true; // 오토플레이 안정성 위해 음소거 유지
+  explainVideo.volume = 0;
+
+  let lastProgressTs = Date.now();
+  let lastTime = 0;
+  const markProgress = () => {
+    lastProgressTs = Date.now();
+    lastTime = explainVideo.currentTime || 0;
+  };
+  const stallTimer = setInterval(()=>{
+    const idleMs = Date.now() - lastProgressTs;
+    if (idleMs > 15000) {
+      clearInterval(stallTimer);
+      explainVideo.removeEventListener('timeupdate', markProgress);
+      explainVideo.removeEventListener('ended', handleEnded);
+      explainVideo.removeEventListener('error', handleError);
+      startCameraCountdown();
+    }
+  }, 3000);
+  const handleEnded = () => {
+    explainVideo.removeEventListener('ended', handleEnded);
+    explainVideo.removeEventListener('timeupdate', markProgress);
+    explainVideo.removeEventListener('error', handleError);
+    clearInterval(stallTimer);
+    startCameraCountdown();
+  };
+  const handleError = () => {
+    explainVideo.removeEventListener('ended', handleEnded);
+    explainVideo.removeEventListener('timeupdate', markProgress);
+    explainVideo.removeEventListener('error', handleError);
+    clearInterval(stallTimer);
+    startCameraCountdown();
+  };
+  explainVideo.addEventListener('timeupdate', markProgress);
+  explainVideo.addEventListener('error', handleError);
+  explainVideo.addEventListener('ended', handleEnded, { once: true });
+
+  try{
+    await forceVideoPlayback(explainVideo);
+  }catch(err){
+    console.error('Explain video play failed', err);
+    clearInterval(stallTimer);
+    explainVideo.removeEventListener('timeupdate', markProgress);
+    explainVideo.removeEventListener('error', handleError);
+    explainVideo.removeEventListener('ended', handleEnded);
+    startCameraCountdown();
+  }
+}
+
+async function startCameraCountdown(){
+  if(duplicateHandled) return;
+  setFlow(FLOW.CAMERA);
+  show(S.CAMERA);
+  await openCam();
+  await attemptPhotoLoop();
+}
+
+async function attemptPhotoLoop(){
+  let replayFrame = 0;
+  while(!duplicateHandled){
+    await startOverlaySequence(replayFrame);
+    stopOverlayAnimation();
+    const blob = await snapshot(video);
+    const status = await uploadPhoto(blob);
+    if (status === 'success') {
+      resetCountDisplay();
+      stopOverlayAnimation();
+      wsSend({ type:'photo_captured', room:roomId, session, at:Date.now() });
+      stopCam();
+      showLoopStage();
+      return;
+    }
+    if (status === 'duplicate') return;
+    await showRetryMessage();
+    replayFrame = OVERLAY_RETRY_FRAME;
+  }
+}
+
+async function openCam(){
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode:'user' }, audio:false });
+    video.srcObject = stream;
+  }catch(err){ console.error('Camera error', err); }
+}
+function snapshot(videoEl){
+  const c = document.createElement('canvas');
+  c.width = videoEl.videoWidth || 1920;
+  c.height = videoEl.videoHeight || 1080;
+  const ctx = c.getContext('2d');
+  ctx.translate(c.width,0); ctx.scale(-1,1);
+  ctx.drawImage(videoEl,0,0,c.width,c.height);
+  return new Promise(res=> c.toBlob(b=>res(b),'image/jpeg',0.92));
+}
+async function uploadPhoto(blob){
+  if (duplicateHandled) return 'duplicate';
+  const fd = new FormData();
+  fd.append('room', roomId);
+  fd.append('session', session || '');
+  fd.append('image', blob, `photo-${roomId}-${session||'nosession'}-${Date.now()}.jpg`);
+  const r = await fetch('/api/upload/photo', { method:'POST', body: fd });
+  if(!r.ok) { console.warn('upload failed', r.status); return 'retry'; }
+  const data = await r.json().catch(()=>null);
+  const faceId = data?.faceId?.response || data?.faceId;
+  const status = (faceId?.status || '').toLowerCase();
+  if (data?.duplicate || status === 'duplicate') {
+    handleDuplicate(data?.message || DUPLICATE_MESSAGE);
+    return 'duplicate';
+  }
+  return status === 'success' ? 'success' : 'retry';
+}
+function countdown(n){
+  return new Promise((resolve)=>{
+    if (n <= 0) {
+      resetCountDisplay();
+      resolve();
+      return;
+    }
+    let cur=n;
+    countEl.style.opacity = 1;
+    countEl.textContent = cur;
+    const t = setInterval(()=>{
+      cur--;
+      if(cur<=0){
+        clearInterval(t);
+        resetCountDisplay();
+        resolve();
+      } else {
+        countEl.textContent = cur;
+      }
+    }, 1000);
+  });
+}
+})();
+</script>
+</body>
+</html>
